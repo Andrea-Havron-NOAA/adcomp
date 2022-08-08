@@ -2041,6 +2041,22 @@ struct global {
       pOp->ref_count.increment();
       return get_glob()->add_to_stack<OperatorBase>(pOp, x);
     }
+    ad_range operator()(const ad_range &x) {
+      TMBAD_ASSERT2(OperatorBase::dynamic,
+                    "Stack to heap copy only allowed for dynamic operators");
+      Complete *pOp = new Complete(*this);
+      TMBAD_ASSERT2(pOp->ref_count() == 0, "Operator already on the heap");
+      pOp->ref_count.increment();
+      return get_glob()->add_to_stack<OperatorBase>(pOp, x);
+    }
+    ad_range operator()(const ad_range &x, const ad_range &y) {
+      TMBAD_ASSERT2(OperatorBase::dynamic,
+                    "Stack to heap copy only allowed for dynamic operators");
+      Complete *pOp = new Complete(*this);
+      TMBAD_ASSERT2(pOp->ref_count() == 0, "Operator already on the heap");
+      pOp->ref_count.increment();
+      return get_glob()->add_to_stack<OperatorBase>(pOp, x, y);
+    }
     template <class T>
     std::vector<T> operator()(const std::vector<T> &x) {
       std::vector<ad_plain> x_(x.begin(), x.end());
@@ -2180,6 +2196,17 @@ struct global {
     template <class Type>
     void forward(ForwardArgs<Type> &args) {}
     void forward(ForwardArgs<Replay> &args);
+    template <class Type>
+    void reverse(ReverseArgs<Type> &args) {}
+    const char *op_name();
+    void forward(ForwardArgs<Writer> &args);
+  };
+  struct DataOp : DynamicOutputOperator<0> {
+    typedef DynamicOutputOperator<0> Base;
+    static const bool is_linear = true;
+    DataOp(Index n);
+    template <class Type>
+    void forward(ForwardArgs<Type> &args) {}
     template <class Type>
     void reverse(ReverseArgs<Type> &args) {}
     const char *op_name();
@@ -2332,8 +2359,33 @@ struct global {
         this->template getOperator<OperatorBase>(lhs, rhs);
     size_t n = pOp->output_size();
     ad_range ans(values.size(), n);
-    inputs.push_back(ad_plain(lhs).index);
-    inputs.push_back(ad_plain(rhs).index);
+    inputs.push_back(lhs.index());
+    inputs.push_back(rhs.index());
+    opstack.push_back<OperatorBase::dynamic>(pOp);
+    values.resize(values.size() + n);
+    ForwardArgs<Scalar> args(inputs, values);
+    args.ptr = ptr;
+    pOp->forward(args);
+
+    TMBAD_ASSERT(!TMBAD_INDEX_OVERFLOW(values.size()));
+    TMBAD_ASSERT(!TMBAD_INDEX_OVERFLOW(inputs.size()));
+    return ans;
+  }
+
+  template <class OperatorBase>
+  ad_range add_to_stack(Complete<OperatorBase> *pOp, ad_range lhs,
+                        ad_range rhs = ad_range()) {
+    static_assert(OperatorBase::dynamic);
+    static_assert(OperatorBase::ninput == 0 ||
+                  OperatorBase::implicit_dependencies);
+
+    IndexPair ptr((Index)inputs.size(), (Index)values.size());
+    size_t n = pOp->output_size();
+    ad_range ans(values.size(), n);
+    TMBAD_ASSERT((Index)(lhs.size() > 0) + (Index)(rhs.size() > 0) ==
+                 pOp->input_size());
+    if (lhs.size() > 0) inputs.push_back(lhs.index());
+    if (rhs.size() > 0) inputs.push_back(rhs.index());
     opstack.push_back<OperatorBase::dynamic>(pOp);
     values.resize(values.size() + n);
     ForwardArgs<Scalar> args(inputs, values);
@@ -2363,7 +2415,7 @@ struct global {
     TMBAD_ASSERT(!TMBAD_INDEX_OVERFLOW(values.size()));
     TMBAD_ASSERT(!TMBAD_INDEX_OVERFLOW(inputs.size()));
     std::vector<ad_plain> out(n);
-    for (size_t i = 0; i < n; i++) out[i].index = ans.index + i;
+    for (size_t i = 0; i < n; i++) out[i].index = ans.index() + i;
     return out;
   }
 
@@ -2573,15 +2625,25 @@ struct global {
   void ad_stop();
   void Independent(std::vector<ad_plain> &x);
   /** \brief Range of `ad_plain` with optional extra information */
-  struct ad_range : ad_plain {
+  struct ad_range {
+    ad_plain x;
     size_t n;
     size_t c;
+    ad_range();
     ad_range(ad_plain x, size_t n);
     ad_range(Index idx, size_t n);
     ad_range(ad_plain x, size_t r, size_t c);
+    ad_range(Replay *x, size_t n, bool zero_check = false);
+    bool identicalZero();
+    bool is_contiguous(Replay *x, size_t n);
+    bool all_zero(Replay *x, size_t n);
+    bool all_constant(Replay *x, size_t n);
     size_t size() const;
     size_t rows() const;
     size_t cols() const;
+
+    ad_plain operator[](size_t i) const;
+    Index index() const;
   };
   /** \brief Augmented AD type \details `ad_aug` is an augmentation of
       the simple type `ad_plain`. It tries hard to keep tapes small by
@@ -2605,6 +2667,7 @@ struct global {
     data;
     bool ontape() const;
     bool constant() const;
+    Index index() const;
     /** \brief Get the tape of this ad_aug
         \return Returns the tape address of this variable **if**
         variable belongs to *some* tape.  Otherwise `NULL` is
@@ -2790,13 +2853,13 @@ Scalar Value(T x) {
 Scalar Value(Scalar x);
 
 /** \brief Is this ad vector available as a contiguous block on the tape?
-    \details Template type 'T' can be
+    \details Template type 'V::value_type' can be
     - ad_plain
     - ad_aug
     - ad_adapt
 */
-template <class T>
-bool isContiguous(std::vector<T> &x) {
+template <class V>
+bool isContiguous(V &x) {
   bool ok = true;
   Index j_previous;
   for (size_t i = 0; i < (size_t)x.size(); i++) {
@@ -2816,25 +2879,25 @@ bool isContiguous(std::vector<T> &x) {
   return ok;
 }
 /** \brief Get contiguous (deep) copy of this vector
-    \details Template type 'T' can be
+    \details Template type 'V::value_type' can be
     - ad_plain
     - ad_aug
     - ad_adapt
 */
-template <class T>
-std::vector<T> getContiguous(const std::vector<T> &x) {
-  std::vector<T> y(x.size());
+template <class V>
+V getContiguous(const V &x) {
+  V y(x.size());
   for (size_t i = 0; i < (size_t)x.size(); i++) y[i] = x[i].copy();
   return y;
 }
 /** \brief Make contiguous ad vector
-    \details Template type 'T' can be
+    \details Template type 'V::value_type' can be
     - ad_plain
     - ad_aug
     - ad_adapt
 */
-template <class T>
-void forceContiguous(std::vector<T> &x) {
+template <class V>
+void forceContiguous(V &x) {
   if (!isContiguous(x)) x = getContiguous(x);
 }
 ad_aug operator+(const double &x, const ad_aug &y);

@@ -43,7 +43,7 @@
 #ifdef _OPENMP
 #include <omp.h>
 #define TMBAD_THREAD_NUM omp_get_thread_num()
-#define TMBAD_SHARED_PTR omp_shared_ptr
+#define TMBAD_SHARED_PTR TMBad::omp_shared_ptr
 #else
 #define TMBAD_SHARED_PTR std::shared_ptr
 #define TMBAD_THREAD_NUM 0
@@ -84,5 +84,20 @@
   template <class T1, class T2, class T3, class T4>              \
   A(const T1 &x1, const T2 &x2, const T3 &x3, const T4 &x4)      \
       : B(x1, x2, x3, x4) {}
+
+/* ========================================================================== */
+/* === Workarounds ========================================================== */
+/* ========================================================================== */
+
+// Used std::vector.resize() without initialization
+template <class T>
+struct no_init {
+  T value;
+  no_init() noexcept {
+    // do nothing
+    static_assert(sizeof *this == sizeof value, "invalid size");
+    static_assert(__alignof * this == __alignof value, "invalid alignment");
+  }
+};
 
 #endif  // HAVE_CONFIG_HPP

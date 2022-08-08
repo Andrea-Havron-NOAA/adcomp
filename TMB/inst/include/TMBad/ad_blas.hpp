@@ -60,10 +60,8 @@ typedef Matrix<global::Replay, Dynamic, Dynamic> vmatrix;
 template <class Target>
 void fill(Target &y, const global::ad_range x) {
   TMBAD_ASSERT((size_t)y.size() == (size_t)x.size());
-  ad_plain xx = x;
   for (size_t i = 0; i < (size_t)y.size(); i++) {
-    y(i) = xx;
-    xx.index++;
+    y(i) = x[i];
   }
 }
 

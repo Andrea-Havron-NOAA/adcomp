@@ -4,6 +4,7 @@
 #include "checkpoint.hpp"
 #include "global.hpp"
 #include "graph_transform.hpp"
+#include "vectorize.hpp"
 
 namespace TMBad {
 
